@@ -37,6 +37,7 @@ Eigen::Vector2d pertub_reprojectError(const Eigen::Matrix<double, 3, 3> &intrins
     Eigen::Matrix<double, 4, 4> curPose = leftLieHybridPoseUpdate(delta_chi, pose);
     Eigen::Vector2d res;
     Eigen::Vector3d repr_p = curPose.block<3, 3>(0, 0) * p3d + curPose.block<3, 1>(0, 3);
+    //wk: 不要忘记除以深度!
     Eigen::Vector3d repr_u = intrinsics * repr_p / repr_p(2);
     res = repr_u.segment<2>(0) - p2d;
     return res;

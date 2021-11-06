@@ -49,6 +49,7 @@ class ReprojectionFactor
                 //std::cout << "du_dg: " << du_dg << std::endl;
                 //wk: jacobian part of dg/ddelta_theta
                 Eigen::Matrix<double, 3, 3> dg_dtheta = Eigen::Matrix<double, 3, 3>::Zero();
+                //wk: 小心这里不是reproj_3dp!
                 Eigen::Vector3d temp_3dp = reproj_3dp - trans;
                 dg_dtheta << 0, temp_3dp(2), -temp_3dp(1),
                           -temp_3dp(2), 0, temp_3dp(0),
