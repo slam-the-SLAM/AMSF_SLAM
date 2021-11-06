@@ -23,7 +23,7 @@ class ReprojectionFactor
     }
         ~ReprojectionFactor() {}
         //wk: calculate Jacobian and Residual
-        void getJacobian_N_Residual(Eigen::Matrix<double, Eigen::Dynamic, 2> &curJacobian, Eigen::Matrix<double, Eigen::Dynamic, 1> &curResidual, const Eigen::Matrix<double, 4, 4> &cur_pose) 
+        void getJacobian_N_Residual(Eigen::Matrix<double, Eigen::Dynamic, 6> &curJacobian, Eigen::Matrix<double, Eigen::Dynamic, 1> &curResidual, const Eigen::Matrix<double, 4, 4> &cur_pose) const 
         {
             //wk: the size is not known at compile-time, we use dynamic-size matrix and relative API, Resize and init at every iteration
             curJacobian.resize(ResidualNum * 2, 6);
@@ -49,9 +49,10 @@ class ReprojectionFactor
                 //std::cout << "du_dg: " << du_dg << std::endl;
                 //wk: jacobian part of dg/ddelta_theta
                 Eigen::Matrix<double, 3, 3> dg_dtheta = Eigen::Matrix<double, 3, 3>::Zero();
-                dg_dtheta << 0, reproj_3dp(2), -reproj_3dp(1),
-                          -reproj_3dp(2), 0, reproj_3dp(0),
-                          reproj_3dp(1), -reproj_3dp(0), 0;
+                Eigen::Vector3d temp_3dp = reproj_3dp - trans;
+                dg_dtheta << 0, temp_3dp(2), -temp_3dp(1),
+                          -temp_3dp(2), 0, temp_3dp(0),
+                          temp_3dp(1), -temp_3dp(0), 0;
                 //wk: check this dg_dtheta
                 //std::cout << "dg_dtheta: " << dg_dtheta << std::endl;
                 //wk: jacobian part of pertubation of translation(the pertubation is in hybrid form)
