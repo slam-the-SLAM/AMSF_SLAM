@@ -13,8 +13,8 @@ typedef std::shared_ptr<std::vector<Eigen::Vector2d>> PixelPtr;
 class ReprojectionFactor
 {
     public:
-        ReprojectionFactor(const PointPtr &p3dp, const PixelPtr &p2dp, const Eigen::Matrix<double, 3, 3> &intrinsics): 
-            p3dp_(p3dp), p2dp_(p2dp), ResidualNum(p3dp->size()) 
+        ReprojectionFactor(const PointPtr &p3dp, const PixelPtr &p2dp, const Eigen::Matrix<double, 3, 3> &intrinsics, double cov_coef): 
+            p3dp_(p3dp), p2dp_(p2dp), ResidualNum(p3dp->size()), cov_coef_(cov_coef)
     {
         fx_ = intrinsics(0, 0);
         fy_ = intrinsics(1, 1);
@@ -23,7 +23,10 @@ class ReprojectionFactor
     }
         ~ReprojectionFactor() {}
         //wk: calculate Jacobian and Residual
-        void getJacobian_N_Residual(Eigen::Matrix<double, Eigen::Dynamic, 6> &curJacobian, Eigen::Matrix<double, Eigen::Dynamic, 1> &curResidual, const Eigen::Matrix<double, 4, 4> &cur_pose) const 
+        void getJacobian_N_Residual(Eigen::Matrix<double, Eigen::Dynamic, 6> &curJacobian, 
+                Eigen::Matrix<double, Eigen::Dynamic, 1> &curResidual, 
+                Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> &information,
+                const Eigen::Matrix<double, 4, 4> &cur_pose) const 
         {
             //wk: the size is not known at compile-time, we use dynamic-size matrix and relative API, Resize and init at every iteration
             curJacobian.resize(ResidualNum * 2, 6);
@@ -63,6 +66,13 @@ class ReprojectionFactor
                 //wk: residuals
                 curResidual(i, 0) = fx_ * reproj_3dp(0) / reproj_3dp(2) + cx_ - p2dp_->at(i)(0);
                 curResidual(i+1, 0) = fy_ * reproj_3dp(1) / reproj_3dp(2) + cy_ - p2dp_->at(i)(1);
+                //wk: informations
+                information.resize(ResidualNum * 2, ResidualNum * 2);
+                information.Constant(ResidualNum * 2, ResidualNum * 2, 0);
+                for(int i=0; i<information.cols(); ++i)
+                {
+                    information(i, i) = 1.0 / cov_coef_;
+                }
             }
         }
     private:
@@ -70,6 +80,7 @@ class ReprojectionFactor
         PointPtr p3dp_;
         PixelPtr p2dp_;
         double fx_, fy_, cx_, cy_;
+        double cov_coef_;
 };
 
 #endif//wk: ReprojectioinFactor
