@@ -63,15 +63,37 @@ Eigen::Vector2d pertub_reprojectError(const Eigen::Matrix<double, 3, 3> &intrins
     return res;
 }
 
-void Optimization(Eigen::Matrix<double, 4, 4> &pose, const ReprojectionFactorPtr &factor, int it_num, const Eigen::Quaterniond &q_gt, const Eigen::Vector3d &p_gt)
+void Optimization(Eigen::Matrix<double, 4, 4> &pose, const ReprojectionFactorPtr &factor, int it_num, double opt_thres, const Eigen::Quaterniond &q_gt, const Eigen::Vector3d &p_gt)
 {
     Eigen::Matrix<double, Eigen::Dynamic, 6> jacobian;
     Eigen::Matrix<double, Eigen::Dynamic, 1> residual;
     Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> information;
-    Vector6d delta_chi;
+    Vector6d delta_chi = Vector6d::Zero();
+    double cost=0, curcost=0;
     for(int i=0; i<it_num; ++i)
     {
         factor->getJacobian_N_Residual(jacobian, residual, information, pose);
+        curcost = residual.transpose() * information * residual;
+        //wk: in case that delta_chi result is nan
+        if(std::isnan(delta_chi[0]))
+        {
+            std::cout << "stop as delta_chi is nan!" << std::endl;
+            break;
+        }
+        //wk: in case that cost increase, or update current cost
+        if(i>0 && curcost>=cost)
+        {
+            std::cout << "stop as cost increase at iteration" << i << std::endl;
+            break;
+        }
+        else
+            cost = curcost;
+        //wk: in case that converge before reach the last iteration
+        if(i>0 && delta_chi.norm() < opt_thres)
+        {
+            std::cout << "stop as converge at iteration" << i << std::endl;
+            break;
+        }
         Eigen::Matrix<double, 6, 6> Hessian = jacobian.transpose() * information * jacobian;
         Eigen::Matrix<double, 6, 1> bres = -1.0 * jacobian.transpose() * information * residual;
         delta_chi = Hessian.ldlt().solve(bres);
@@ -80,10 +102,10 @@ void Optimization(Eigen::Matrix<double, 4, 4> &pose, const ReprojectionFactorPtr
         //std::cout << "delta_chi norm: " << delta_chi.norm() << std::endl;
         //std::cout << "delta_chi: " << delta_chi << std::endl;
         //std::cout << "residual norm: " << residual.norm() << std::endl;
-        Eigen::Quaterniond q_res(pose.block<3, 3>(0, 0));
-        Eigen::Vector3d p_res(pose.block<3, 1>(0, 3));
-        std::cout << "diff_q is: " << 2 * (q_gt.inverse() * q_res).vec().norm() << std::endl;
-        std::cout << "diff_p is: " << (p_gt - p_res).norm() << std::endl;
+        //Eigen::Quaterniond q_res(pose.block<3, 3>(0, 0));
+        //Eigen::Vector3d p_res(pose.block<3, 1>(0, 3));
+        //std::cout << "diff_q is: " << 2 * (q_gt.inverse() * q_res).vec().norm() << std::endl;
+        //std::cout << "diff_p is: " << (p_gt - p_res).norm() << std::endl;
     }
 }
 
@@ -104,17 +126,17 @@ int main()
     Eigen::Vector3d axis(1, 1, 1);
     axis = axis / axis.norm();
     Eigen::AngleAxisd rotVec(M_PI/4, axis);
-    Eigen::Vector3d trans(0, 0, 0.3);
+    Eigen::Vector3d trans(0, 0, 0.5);
     pose.block<3, 3>(0, 0) = rotVec.matrix();
     pose.block<3, 1>(0, 3) = trans;
 
     Eigen::Matrix<double, 4, 4> pose_disturb = Eigen::Matrix<double, 4, 4>::Identity();
     Eigen::Vector3d rdmvec = Eigen::Vector3d::Random();
     rdmvec = rdmvec / rdmvec.norm();
-    Eigen::AngleAxisd rotVec_disturb(0.1, rdmvec);
+    Eigen::AngleAxisd rotVec_disturb(0.3, rdmvec);
     rdmvec = Eigen::Vector3d::Random();
     rdmvec = rdmvec / rdmvec.norm();
-    std::cout << "rdmvec after normalize: " << rdmvec << std::endl;
+    //std::cout << "rdmvec after normalize: " << rdmvec << std::endl;
     Eigen::Vector3d trans_disturb = rdmvec * 0.1;
     pose_disturb.block<3, 3>(0, 0) = rotVec_disturb.matrix() * pose.block<3, 3>(0, 0);
     pose_disturb.block<3, 1>(0, 3) = trans_disturb + pose.block<3, 1>(0, 3);
@@ -126,7 +148,7 @@ int main()
     PixelPtr dp2_repr(new std::vector<Eigen::Vector2d>());
     //can change this part to use multi points here
     //residual_number
-    int residualNum = 10;
+    int residualNum = 500;
     for(int i=0; i<residualNum; ++i)
     {
         //double x = 0;
@@ -134,7 +156,8 @@ int main()
         //double depth = 3.5;
         //Eigen::Vector4d p_ori(x, y, depth, 1);
         Eigen::Vector3d rdm_p = Eigen::Vector3d::Random();
-        Eigen::Vector4d p_ori(2 * rdm_p(0), 2 * rdm_p(1), 5 * rdm_p(2), 1);
+        double scale = 3.0;
+        Eigen::Vector4d p_ori(scale * rdm_p(0), scale * rdm_p(1), scale * fabs(rdm_p(2)) + scale - pose(2, 3), 1);//wk: generate 3d points, NOTE that all points should be at the front of the camera
         Eigen::Vector4d p_repr = pose * p_ori;
         Eigen::Vector2d u_ori(fx * p_repr(0) / p_repr(2) + cx, 
                 fy * p_repr(1) / p_repr(2) + cy);
@@ -174,7 +197,7 @@ int main()
     std::cout << "the diff of residual is: " << diff_residual.norm() << std::endl;
 
     //check jacobian
-    double j_thres = 1e-6;
+    double j_thres = 1e-5;
     double delta = 1e-6;
     Eigen::Matrix<double, Eigen::Dynamic, 6> ref_jacobian;
     ref_jacobian.resize(jacobian.rows(), jacobian.cols());
@@ -214,13 +237,18 @@ int main()
     //check optimization
     double p_thres = 1e-1;
     double q_thres = 1e-2;
+    double op_thres = 1e-6;
     Eigen::Quaterniond q_gt(pose.block<3, 3>(0, 0));
     Eigen::Vector3d p_gt(pose.block<3, 1>(0, 3));
     Eigen::Quaterniond q_res(pose_disturb.block<3, 3>(0, 0));
     Eigen::Vector3d p_res(pose_disturb.block<3, 1>(0, 3));
     std::cout << "start diff_q is: " << 2 * (q_gt.inverse() * q_res).vec().norm() << std::endl;
     std::cout << "start diff_p is: " << (p_gt - p_res).norm() << std::endl;
-    Optimization(pose_disturb, ReprFactor, 20, q_gt, p_gt);
+    Optimization(pose_disturb, ReprFactor, 30, op_thres, q_gt, p_gt);
+    q_res = pose_disturb.block<3, 3>(0, 0);
+    p_res = pose_disturb.block<3, 1>(0, 3);
+    std::cout << "end diff_q is: " << 2 * (q_gt.inverse() * q_res).vec().norm() << std::endl;
+    std::cout << "end diff_p is: " << (p_gt - p_res).norm() << std::endl;
 
     return 0;
 }
