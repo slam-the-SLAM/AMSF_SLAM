@@ -9,6 +9,7 @@ typedef std::shared_ptr<std::vector<Eigen::Vector2d>> PixelPtr;
 typedef std::shared_ptr<ReprojectionFactor> ReprojectionFactorPtr;
 typedef Eigen::Matrix<double, 6, 1> Vector6d;
 
+//wk: 位姿更新, 旋转上采用left Lie perturbation, 且error state采用hybrid(混合式)而非se3李代数
 Eigen::Matrix<double, 4, 4> leftLieHybridPoseUpdate(const Vector6d &delta_chi, const Eigen::Matrix<double, 4, 4> &pose)
 {
     Eigen::Matrix<double, 4, 4> res = pose;
@@ -48,10 +49,10 @@ Eigen::Matrix<double, 4, 4> leftLieHybridPoseUpdate(const Vector6d &delta_chi, c
     return res;
 }
 
-Eigen::Vector2d pertub_reprojectError(const Eigen::Matrix<double, 3, 3> &intrinsics, 
-        const Vector6d &delta_chi, 
-        const Eigen::Matrix<double, 4, 4> &pose, 
-        const Eigen::Vector3d &p3d, 
+Eigen::Vector2d perturb_reprojectError(const Eigen::Matrix<double, 3, 3> &intrinsics,
+        const Vector6d &delta_chi,
+        const Eigen::Matrix<double, 4, 4> &pose,
+        const Eigen::Vector3d &p3d,
         const Eigen::Vector2d &p2d)
 {
     Eigen::Matrix<double, 4, 4> curPose = leftLieHybridPoseUpdate(delta_chi, pose);
@@ -63,17 +64,87 @@ Eigen::Vector2d pertub_reprojectError(const Eigen::Matrix<double, 3, 3> &intrins
     return res;
 }
 
-void Optimization(Eigen::Matrix<double, 4, 4> &pose, const ReprojectionFactorPtr &factor, int it_num, double opt_thres, const Eigen::Quaterniond &q_gt, const Eigen::Vector3d &p_gt)
+void Optimization_GN(Eigen::Matrix<double, 4, 4> &pose,
+        const PointPtr &p3dp,
+        const PixelPtr &p2dp,
+        const PointPtr &p3dp_repr, //wk: just for checking residual and jacobian
+        const PixelPtr &p2dp_repr, //wk: just for checking residual and jacobian
+        const Eigen::Matrix3d &intrinsics, //wk: just for checking residual and jacobian
+        const ReprojectionFactorPtr &factor,
+        int it_num,
+        double opt_thres,
+        /*const Eigen::Quaterniond &q_gt,*/
+        /*const Eigen::Vector3d &p_gt,*/
+        bool check=false)
 {
-    Eigen::Matrix<double, Eigen::Dynamic, 6> jacobian;
-    Eigen::Matrix<double, Eigen::Dynamic, 1> residual;
-    Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> information;
+    Eigen::Matrix<double, 2, 6> jacobian;
+    Eigen::Vector2d residual;
+    Eigen::Matrix<double, 2, 2> information;
+    Eigen::Matrix<double, 6, 6> Hessian;
+    Vector6d bres;
     Vector6d delta_chi = Vector6d::Zero();
     double cost=0, curcost=0;
+    bool residualOK = true;
+    bool jacobianOK = true;
     for(int i=0; i<it_num; ++i)
     {
-        factor->getJacobian_N_Residual(jacobian, residual, information, pose);
-        curcost = residual.transpose() * information * residual;
+        Hessian.setZero();
+        bres.setZero();
+        curcost = 0;
+        for(int j=0; j<p3dp->size(); ++j)
+        {
+            factor->get_jacobian_N_residual(jacobian, residual, information, pose, p3dp->at(j), p2dp->at(j));
+            Hessian += jacobian.transpose() * information * jacobian;
+            bres += -1.0 * jacobian.transpose() * information * residual;
+            curcost += residual.transpose() * information * residual;
+            if(check && 0==i)
+            {
+                //check residual
+                double r_thres = 1e-10;
+                Eigen::Vector2d ref_residual = p2dp_repr->at(j) - p2dp->at(j);
+                Eigen::Vector2d diff_residual = residual - ref_residual;
+                if(diff_residual.norm() > r_thres)
+                {
+                    std::cout << "residual calculation WRONG!" << std::endl;
+                    std::cout << "the diff of residual is: " << diff_residual.norm() << std::endl;
+                    residualOK = false;
+                    break;
+                }
+                /*else*/
+                    /*std::cout << "residual calculation right!!!" << std::endl;*/
+                //check jacobian
+                double j_thres = 1e-5;
+                double delta = 1e-6;
+                Eigen::Matrix<double, 2, 6> ref_jacobian;
+                Eigen::Vector2d positive_result, negative_result;
+                for(int k=0; k<6; ++k)
+                {
+                    //init delta_chi_chk every col of jacobian
+                    Vector6d delta_chi_chk = Vector6d::Zero();
+                    delta_chi_chk(k) = delta;
+                    positive_result = perturb_reprojectError(intrinsics, delta_chi_chk, pose, p3dp->at(j), p2dp->at(j));
+                    //std::cout << "positive_result " << i << " " << j << ":\n" << positive_result << std::endl;
+                    delta_chi_chk(k) = -delta;
+                    negative_result = perturb_reprojectError(intrinsics, delta_chi_chk, pose, p3dp->at(j), p2dp->at(j));
+                    //std::cout << "negative_result " << i << " " << j << ":\n" << negative_result << std::endl;
+                    ref_jacobian.block<2, 1>(0, k) = 0.5 * (positive_result - negative_result) / delta;
+                }
+                Eigen::Matrix<double, 2, 6> diff_jacobian = jacobian - ref_jacobian;
+                if(diff_jacobian.norm() > j_thres)
+                {
+                    std::cout << "jacobian calculation WRONG" << std::endl;
+                    std::cout << "the diff of jacobian is: " << diff_jacobian.norm() << std::endl;
+                    jacobianOK = false;
+                    break;
+                }
+                /*else*/
+                    /*std::cout << "jacobian calculation right!!!" << std::endl;*/
+            }
+        }
+        if(check && 0==i && (!residualOK || !jacobianOK))
+            break;
+        //wk: solve delta_chi
+        delta_chi = Hessian.ldlt().solve(bres);
         //wk: in case that delta_chi result is nan
         if(std::isnan(delta_chi[0]))
         {
@@ -94,9 +165,6 @@ void Optimization(Eigen::Matrix<double, 4, 4> &pose, const ReprojectionFactorPtr
             std::cout << "stop as converge at iteration" << i << std::endl;
             break;
         }
-        Eigen::Matrix<double, 6, 6> Hessian = jacobian.transpose() * information * jacobian;
-        Eigen::Matrix<double, 6, 1> bres = -1.0 * jacobian.transpose() * information * residual;
-        delta_chi = Hessian.ldlt().solve(bres);
         Eigen::Matrix<double, 4, 4> curPose = leftLieHybridPoseUpdate(delta_chi, pose);
         pose = curPose;
         //std::cout << "delta_chi norm: " << delta_chi.norm() << std::endl;
@@ -108,6 +176,52 @@ void Optimization(Eigen::Matrix<double, 4, 4> &pose, const ReprojectionFactorPtr
         //std::cout << "diff_p is: " << (p_gt - p_res).norm() << std::endl;
     }
 }
+
+/*void Optimization(Eigen::Matrix<double, 4, 4> &pose, const ReprojectionFactorPtr &factor, int it_num, double opt_thres, const Eigen::Quaterniond &q_gt, const Eigen::Vector3d &p_gt)*/
+/*{*/
+    /*Eigen::Matrix<double, Eigen::Dynamic, 6> jacobian;*/
+    /*Eigen::Matrix<double, Eigen::Dynamic, 1> residual;*/
+    /*Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> information;*/
+    /*Vector6d delta_chi = Vector6d::Zero();*/
+    /*double cost=0, curcost=0;*/
+    /*for(int i=0; i<it_num; ++i)*/
+    /*{*/
+        /*factor->getJacobian_N_Residual(jacobian, residual, information, pose);*/
+        /*curcost = residual.transpose() * information * residual;*/
+        /*//wk: in case that delta_chi result is nan*/
+        /*if(std::isnan(delta_chi[0]))*/
+        /*{*/
+            /*std::cout << "stop as delta_chi is nan!" << std::endl;*/
+            /*break;*/
+        /*}*/
+        /*//wk: in case that cost increase, or update current cost*/
+        /*if(i>0 && curcost>=cost)*/
+        /*{*/
+            /*std::cout << "stop as cost increase at iteration" << i << std::endl;*/
+            /*break;*/
+        /*}*/
+        /*else*/
+            /*cost = curcost;*/
+        /*//wk: in case that converge before reach the last iteration*/
+        /*if(i>0 && delta_chi.norm() < opt_thres)*/
+        /*{*/
+            /*std::cout << "stop as converge at iteration" << i << std::endl;*/
+            /*break;*/
+        /*}*/
+        /*Eigen::Matrix<double, 6, 6> Hessian = jacobian.transpose() * information * jacobian;*/
+        /*Eigen::Matrix<double, 6, 1> bres = -1.0 * jacobian.transpose() * information * residual;*/
+        /*delta_chi = Hessian.ldlt().solve(bres);*/
+        /*Eigen::Matrix<double, 4, 4> curPose = leftLieHybridPoseUpdate(delta_chi, pose);*/
+        /*pose = curPose;*/
+        /*//std::cout << "delta_chi norm: " << delta_chi.norm() << std::endl;*/
+        /*//std::cout << "delta_chi: " << delta_chi << std::endl;*/
+        /*//std::cout << "residual norm: " << residual.norm() << std::endl;*/
+        /*//Eigen::Quaterniond q_res(pose.block<3, 3>(0, 0));*/
+        /*//Eigen::Vector3d p_res(pose.block<3, 1>(0, 3));*/
+        /*//std::cout << "diff_q is: " << 2 * (q_gt.inverse() * q_res).vec().norm() << std::endl;*/
+        /*//std::cout << "diff_p is: " << (p_gt - p_res).norm() << std::endl;*/
+    /*}*/
+/*}*/
 
 int main()
 {
@@ -161,9 +275,9 @@ int main()
         Eigen::Vector4d p_repr = pose * p_ori;
         Eigen::Vector2d u_ori(fx * p_repr(0) / p_repr(2) + cx, 
                 fy * p_repr(1) / p_repr(2) + cy);
-        //pixel pertubation
-        //Eigen::Vector2d u_pertubation = Eigen::Vector2d::Random();
-        //Eigen::Vector2d u_repr = u_ori + u_pertubation;
+        //pixel perturbation
+        //Eigen::Vector2d u_perturbation = Eigen::Vector2d::Random();
+        //Eigen::Vector2d u_repr = u_ori + u_perturbation;
         //pose disturb
         Eigen::Vector4d p_repr_disturb = pose_disturb * p_ori;
         Eigen::Vector2d u_repr(fx * p_repr_disturb(0) / p_repr_disturb(2) + cx, 
@@ -173,66 +287,9 @@ int main()
         dp2->push_back(u_ori);
         dp2_repr->push_back(u_repr);
     }
+
     //Reprojection Factor
-    ReprojectionFactorPtr ReprFactor(new ReprojectionFactor(dp3, dp2, intrinsics, 1.0));
-    Eigen::Matrix<double, Eigen::Dynamic, 6> jacobian;
-    Eigen::Matrix<double, Eigen::Dynamic, 1> residual;
-    Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> information;
-    ReprFactor->getJacobian_N_Residual(jacobian, residual, information, pose_disturb);
-
-    //check residual
-    double r_thres = 1e-10;
-    Eigen::Matrix<double, Eigen::Dynamic, 1> ref_residual;
-    ref_residual.resize(residual.rows(), residual.cols());
-    ref_residual.Constant(ref_residual.rows(), ref_residual.cols(), 0);
-    for(int i=0; i<dp3->size(); ++i)
-    {
-        ref_residual.block<2, 1>(i, 0) = dp2_repr->at(i) - dp2->at(i);
-    }
-    Eigen::Matrix<double, Eigen::Dynamic, 1> diff_residual = residual - ref_residual;
-    if(diff_residual.norm() > r_thres)
-        std::cout << "residual calculation WRONG!" << std::endl;
-    else
-        std::cout << "residual calculation right!!!" << std::endl;
-    std::cout << "the diff of residual is: " << diff_residual.norm() << std::endl;
-
-    //check jacobian
-    double j_thres = 1e-5;
-    double delta = 1e-6;
-    Eigen::Matrix<double, Eigen::Dynamic, 6> ref_jacobian;
-    ref_jacobian.resize(jacobian.rows(), jacobian.cols());
-    ref_jacobian.Constant(ref_jacobian.rows(), ref_jacobian.cols(), 0);
-    Eigen::Vector2d positive_result, negative_result;
-    for(int i=0; i<residualNum; ++i)
-    {
-        //check points
-        //std::cout << "point3d: " << dp3->at(i) << std::endl;
-        //std::cout << "point2d: " << dp2->at(i) << std::endl;
-        for(int j=0; j<6; ++j)
-        {
-            //translational
-            //rotational
-            //init delta_chi every col of jacobian
-            Vector6d delta_chi = Vector6d::Zero();
-            delta_chi(j) = delta;
-            std::cout.precision(9);
-            positive_result = pertub_reprojectError(intrinsics, delta_chi, pose_disturb, dp3->at(i), dp2->at(i));
-            //std::cout << "positive_result " << i << " " << j << ":\n" << positive_result << std::endl;
-            delta_chi(j) = -delta;
-            negative_result = pertub_reprojectError(intrinsics, delta_chi, pose_disturb, dp3->at(i), dp2->at(i));
-            //std::cout << "negative_result " << i << " " << j << ":\n" << negative_result << std::endl;
-            ref_jacobian.block<2, 1>(i, j) = 0.5 * (positive_result - negative_result) / delta;
-        }
-    }
-    Eigen::Matrix<double, Eigen::Dynamic, 6> diff_jacobian = jacobian - ref_jacobian;
-    if(diff_jacobian.norm() > j_thres)
-        std::cout << "jacobian calculation WRONG" << std::endl;
-    else
-        std::cout << "jacobian calculation right!!!" << std::endl;
-    std::cout << "the diff of jacobian is: " << diff_jacobian.norm() << std::endl;
-    //std::cout.precision(9);
-    //std::cout << "jacobian:\n" << jacobian << std::endl;
-    //std::cout << "ref_jacobian:\n" << ref_jacobian << std::endl;
+    ReprojectionFactorPtr ReprFactor(new ReprojectionFactor(intrinsics, 1.0));
 
     //check optimization
     double p_thres = 1e-1;
@@ -244,11 +301,99 @@ int main()
     Eigen::Vector3d p_res(pose_disturb.block<3, 1>(0, 3));
     std::cout << "start diff_q is: " << 2 * (q_gt.inverse() * q_res).vec().norm() << std::endl;
     std::cout << "start diff_p is: " << (p_gt - p_res).norm() << std::endl;
-    Optimization(pose_disturb, ReprFactor, 30, op_thres, q_gt, p_gt);
+    Optimization_GN(pose_disturb,
+            dp3,
+            dp2,
+            dp3_repr,
+            dp2_repr,
+            intrinsics,
+            ReprFactor,
+            30,
+            op_thres,
+            /*q_gt, */
+            /*p_gt, */
+            true);
     q_res = pose_disturb.block<3, 3>(0, 0);
     p_res = pose_disturb.block<3, 1>(0, 3);
     std::cout << "end diff_q is: " << 2 * (q_gt.inverse() * q_res).vec().norm() << std::endl;
     std::cout << "end diff_p is: " << (p_gt - p_res).norm() << std::endl;
+
+    /*//Reprojection Factor*/
+    /*ReprojectionFactorPtr ReprFactor(new ReprojectionFactor(dp3, dp2, intrinsics, 1.0));*/
+    /*Eigen::Matrix<double, Eigen::Dynamic, 6> jacobian;*/
+    /*Eigen::Matrix<double, Eigen::Dynamic, 1> residual;*/
+    /*Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> information;*/
+    /*ReprFactor->getJacobian_N_Residual(jacobian, residual, information, pose_disturb);*/
+
+    /*//check residual*/
+    /*double r_thres = 1e-10;*/
+    /*Eigen::Matrix<double, Eigen::Dynamic, 1> ref_residual;*/
+    /*ref_residual.resize(residual.rows(), residual.cols());*/
+    /*ref_residual.Constant(ref_residual.rows(), ref_residual.cols(), 0);*/
+    /*for(int i=0; i<dp3->size(); ++i)*/
+    /*{*/
+        /*ref_residual.block<2, 1>(i, 0) = dp2_repr->at(i) - dp2->at(i);*/
+    /*}*/
+    /*Eigen::Matrix<double, Eigen::Dynamic, 1> diff_residual = residual - ref_residual;*/
+    /*if(diff_residual.norm() > r_thres)*/
+        /*std::cout << "residual calculation WRONG!" << std::endl;*/
+    /*else*/
+        /*std::cout << "residual calculation right!!!" << std::endl;*/
+    /*std::cout << "the diff of residual is: " << diff_residual.norm() << std::endl;*/
+
+    /*//check jacobian*/
+    /*double j_thres = 1e-5;*/
+    /*double delta = 1e-6;*/
+    /*Eigen::Matrix<double, Eigen::Dynamic, 6> ref_jacobian;*/
+    /*ref_jacobian.resize(jacobian.rows(), jacobian.cols());*/
+    /*ref_jacobian.Constant(ref_jacobian.rows(), ref_jacobian.cols(), 0);*/
+    /*Eigen::Vector2d positive_result, negative_result;*/
+    /*for(int i=0; i<residualNum; ++i)*/
+    /*{*/
+        /*//check points*/
+        /*//std::cout << "point3d: " << dp3->at(i) << std::endl;*/
+        /*//std::cout << "point2d: " << dp2->at(i) << std::endl;*/
+        /*for(int j=0; j<6; ++j)*/
+        /*{*/
+            /*//translational*/
+            /*//rotational*/
+            /*//init delta_chi every col of jacobian*/
+            /*Vector6d delta_chi = Vector6d::Zero();*/
+            /*delta_chi(j) = delta;*/
+            /*std::cout.precision(9);*/
+            /*positive_result = perturb_reprojectError(intrinsics, delta_chi, pose_disturb, dp3->at(i), dp2->at(i));*/
+            /*//std::cout << "positive_result " << i << " " << j << ":\n" << positive_result << std::endl;*/
+            /*delta_chi(j) = -delta;*/
+            /*negative_result = perturb_reprojectError(intrinsics, delta_chi, pose_disturb, dp3->at(i), dp2->at(i));*/
+            /*//std::cout << "negative_result " << i << " " << j << ":\n" << negative_result << std::endl;*/
+            /*ref_jacobian.block<2, 1>(i, j) = 0.5 * (positive_result - negative_result) / delta;*/
+        /*}*/
+    /*}*/
+    /*Eigen::Matrix<double, Eigen::Dynamic, 6> diff_jacobian = jacobian - ref_jacobian;*/
+    /*if(diff_jacobian.norm() > j_thres)*/
+        /*std::cout << "jacobian calculation WRONG" << std::endl;*/
+    /*else*/
+        /*std::cout << "jacobian calculation right!!!" << std::endl;*/
+    /*std::cout << "the diff of jacobian is: " << diff_jacobian.norm() << std::endl;*/
+    /*//std::cout.precision(9);*/
+    /*//std::cout << "jacobian:\n" << jacobian << std::endl;*/
+    /*//std::cout << "ref_jacobian:\n" << ref_jacobian << std::endl;*/
+
+    /*//check optimization*/
+    /*double p_thres = 1e-1;*/
+    /*double q_thres = 1e-2;*/
+    /*double op_thres = 1e-6;*/
+    /*Eigen::Quaterniond q_gt(pose.block<3, 3>(0, 0));*/
+    /*Eigen::Vector3d p_gt(pose.block<3, 1>(0, 3));*/
+    /*Eigen::Quaterniond q_res(pose_disturb.block<3, 3>(0, 0));*/
+    /*Eigen::Vector3d p_res(pose_disturb.block<3, 1>(0, 3));*/
+    /*std::cout << "start diff_q is: " << 2 * (q_gt.inverse() * q_res).vec().norm() << std::endl;*/
+    /*std::cout << "start diff_p is: " << (p_gt - p_res).norm() << std::endl;*/
+    /*Optimization(pose_disturb, ReprFactor, 30, op_thres, q_gt, p_gt);*/
+    /*q_res = pose_disturb.block<3, 3>(0, 0);*/
+    /*p_res = pose_disturb.block<3, 1>(0, 3);*/
+    /*std::cout << "end diff_q is: " << 2 * (q_gt.inverse() * q_res).vec().norm() << std::endl;*/
+    /*std::cout << "end diff_p is: " << (p_gt - p_res).norm() << std::endl;*/
 
     return 0;
 }
