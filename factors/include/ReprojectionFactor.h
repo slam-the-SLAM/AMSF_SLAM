@@ -13,6 +13,7 @@
 class ReprojectionFactor
 {
     public:
+        EIGEN_MAKE_ALIGNED_OPERATOR_NEW //wk: see https://zhuanlan.zhihu.com/p/93824687
         ReprojectionFactor(/*const PointPtr &p3dp,*/
                 /*const PixelPtr &p2dp,*/
                 const Eigen::Matrix<double, 3, 3> &intrinsics,
