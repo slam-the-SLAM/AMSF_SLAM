@@ -51,7 +51,7 @@ Eigen::Matrix<double, 4, 4> leftLieHybridPoseUpdate(const Vector6d &delta_chi, c
     cur_q.normalized();
 
     res.block<3, 3>(0, 0) = cur_q.toRotationMatrix();
-    res.block<3, 1>(0, 3) = trans + dp; 
+    res.block<3, 1>(0, 3) = trans + dp;
     return res;
 }
 
