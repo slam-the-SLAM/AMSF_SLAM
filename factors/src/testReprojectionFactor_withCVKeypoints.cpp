@@ -333,6 +333,18 @@ int main(int argc, char** argv)
     /*std::cout << "end diff_q is: " << 2 * (q_gt.inverse() * q_res).vec().norm() << std::endl;*/
     /*std::cout << "end diff_p is: " << (p_gt - p_res).norm() << std::endl;*/
     std::cout << "optimized pose is:\n" << pose_disturb << std::endl;
+    Eigen::Matrix3d R_book;
+    R_book << 0.99786620258, -0.0516724160901, 0.0399124437155,
+           0.050595891549, 0.998339762774, 0.02752769194,
+           -0.0412686019426, -0.0254495477483, 0.998823919924;
+    Eigen::Vector3d p_book(-0.127225965886, -0.00750729768072, 0.0613858418151);
+    Eigen::Quaterniond q_book(R_book);
+
+    Eigen::Matrix3d R_res = pose_disturb.block<3, 3>(0, 0);
+    Eigen::Quaterniond q_res(R_res);
+    Eigen::Vector3d p_res = pose_disturb.block<3, 1>(0, 3);
+    std::cout << "end diff_q is: " << 2 * (q_book.inverse() * q_res).vec().norm() << std::endl;
+    std::cout << "end diff_p is: " << (p_book - p_res).norm() << std::endl;
 
     return 0;
 }

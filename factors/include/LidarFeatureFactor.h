@@ -53,13 +53,30 @@ class LidarFeatureFactor
             //jacobian of corner feature
             Eigen::Matrix3d dcurr_cp_dp = -rot.transpose();
             Eigen::Matrix3d dcurr_cp_dtheta = rot.transpose() * Utility::skewSymmetric(curr_cp_curr - trans);
-            Eigen::Vector3d normhight = ref_cp1 - ref_cp2;
+            Eigen::Vector3d normhight = ref_cp2 - ref_cp1;
             normhight.normalize();
             jacobian.block<1, 3>(1, 0) = cornerRhomboid.normalized().transpose() * Utility::skewSymmetric(normhight) * dcurr_cp_dp;
             jacobian.block<1, 3>(1, 3) = cornerRhomboid.normalized().transpose() * Utility::skewSymmetric(normhight) * dcurr_cp_dtheta;
             //information
             information = Eigen::Matrix<double, 2, 2>::Identity();
         }
+        Eigen::Vector2d get_residual(const Eigen::Matrix4d &pose,
+                const LiDARfeatures &surfFeature,
+                const LiDARfeatures &cornerFeature) const
+        {
+            //trans and rot
+            Eigen::Vector3d trans = pose.block<3, 1>(0, 3);
+            Eigen::Matrix3d rot = pose.block<3, 3>(0, 0);
+            Eigen::Vector2d residual;
+            Eigen::Vector3d surfRhomboid = Utility::skewSymmetric(surfFeature.at(1) - surfFeature.at(2)) * (surfFeature.at(1) - surfFeature.at(3));
+            residual(0) = ((rot.transpose() * (surfFeature.at(0) - trans)) - surfFeature.at(1)).transpose() * (surfRhomboid.normalized());
+
+            Eigen::Vector3d curr_cp = rot.transpose() * (cornerFeature.at(0) - trans);
+            Eigen::Vector3d cornerRhomboid = Utility::skewSymmetric(curr_cp - cornerFeature.at(1)) * (curr_cp - cornerFeature.at(2));//wk:在边缘特征中由当前特征点与上一时刻边缘上的两个点构成的平行四边形的法向量并乘上该平行四边形的面积
+            residual(1) = cornerRhomboid.norm() / (cornerFeature.at(1) - cornerFeature.at(2)).norm();
+            return residual;
+        }
+
         void get_surf_jacobian_N_residual(Eigen::Matrix<double, 1, 3> &jacobian,
                 double &residual,
                 double &information,
